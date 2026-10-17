@@ -16,19 +16,11 @@ Express and PostgreSQL/Prisma backend for the OG CAPS storefront. Express serves
 
 For deployment, use `npm run db:deploy` against an already provisioned PostgreSQL database, then `npm start`. Never use development migration commands against production.
 
-## Vercel demo deployment
+## Vercel static demo deployment
 
-This project supports Vercel's Express runtime through the default Express app export in `src/app.js`. Import the `OG-CAPS` GitHub repository into Vercel and use the Express framework preset (or let Vercel detect it). Set the build command to `npm run db:generate`.
+Vercel deploys this project as a static, read-only storefront using `vercel.json` and `npm run build:vercel`. It serves the files in `public/` and does not start the Express or Prisma backend, so no database or environment variables are required. The included sample catalog supports browsing, search, filters, currency display, and a local demo bag. Prices and stock are placeholders; checkout, accounts, order history, and administration are unavailable. Do not treat the sample catalog as real products, prices, or inventory.
 
-Vercel does not provide this project with a PostgreSQL database automatically. Create a PostgreSQL database with a provider such as Neon, then add these Vercel project environment variables:
-
-- `DATABASE_URL`: the provider's PostgreSQL connection string (use its pooled connection URL when available).
-- `ADMIN_EMAIL` and `ADMIN_PASSWORD`: configure both together; use at least 12 characters for production.
-- `PHP_PER_USD`: optional; defaults to `57.5`.
-
-Vercel's deployment and project production domains are added to the API's CORS allowlist automatically, and proxy trust defaults to one hop on Vercel. If you use a custom domain, add its full `https://` origin to `CORS_ORIGINS`. After adding environment variables, apply the existing production migrations and sample-only catalog once using `npm run db:deploy` and `npm run db:seed` against the Vercel database. Run these production commands from a trusted environment configured with the same database/admin variables; never run `db:migrate` against production.
-
-To keep product photo uploads across deployments, create and connect a **public Vercel Blob** store to the project for Production and Preview. Vercel then provides Blob authentication automatically. Without a connected Blob store, the site and API run but the photo upload endpoint returns an explicit setup error. Local and Render deployments continue saving uploads to `public/assets/images/products/uploads/`.
+Import the `OG-CAPS` GitHub repository into Vercel and deploy with the repository's default settings. To make the storefront dynamic and enable checkout, accounts, and administration, deploy the Express backend to a host with PostgreSQL support (such as Render), or connect it to a separately provisioned PostgreSQL provider and configure `DATABASE_URL` there. Vercel can use external databases; it simply does not create one automatically.
 
 ## Render demo deployment
 

@@ -1,13 +1,17 @@
 import { convertMinorAmount } from './currency.js';
+import { filterCatalog, validateCatalogCart } from './static-catalog.js';
 
 const API_BASE = '/api/v1';
 const CART_KEY = 'ogcaps-guest-cart';
 const CURRENCY_KEY = 'ogcaps-display-currency';
+const STATIC_DEMO = window.OG_CAPS_STATIC_DEMO === true;
 const supportedCurrencies = ['PHP', 'USD'];
 let displayCurrency = supportedCurrencies.includes(localStorage.getItem(CURRENCY_KEY))
   ? localStorage.getItem(CURRENCY_KEY)
   : 'PHP';
 let phpPerUsd = null;
+let staticProducts = [];
+let staticCatalogError = '';
 const COLLECTIONS = {
   'new-arrivals': { name: 'New Arrivals', description: 'Fresh into the rotation. Meet the latest from OG CAPS.' },
   'fitted-caps': { name: 'Fitted Caps', description: 'A closer fit, finished with the details that matter.' },
@@ -85,6 +89,7 @@ function unwrap(body) {
 }
 
 async function api(path, options = {}) {
+  if (STATIC_DEMO) return staticApi(path, options);
   const csrfToken = document.cookie.split('; ').find((entry) => entry.startsWith('ogcaps_csrf='))?.split('=').slice(1).join('=');
   const method = (options.method || 'GET').toUpperCase();
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
@@ -102,6 +107,67 @@ async function api(path, options = {}) {
     throw new Error(message);
   }
   return unwrap(body);
+}
+
+function staticApi(path, options) {
+  const url = new URL(path, location.origin);
+  const method = (options.method || 'GET').toUpperCase();
+  if (staticCatalogError) throw new Error(staticCatalogError);
+
+  if (method === 'GET' && url.pathname === '/store-config') return { PHP_PER_USD: 57.5 };
+  if (method === 'GET' && url.pathname === '/products') {
+    return filterCatalog(staticProducts, {
+      search: url.searchParams.get('search') || url.searchParams.get('q') || '',
+      sort: url.searchParams.get('sort') || 'featured',
+      color: url.searchParams.get('color') || '',
+      minPriceCents: url.searchParams.has('minPrice') ? Number(url.searchParams.get('minPrice')) : undefined,
+      maxPriceCents: url.searchParams.has('maxPrice') ? Number(url.searchParams.get('maxPrice')) : undefined,
+      inStock: url.searchParams.get('inStock') === 'true',
+    });
+  }
+
+  const collectionProductsMatch = url.pathname.match(/^\/collections\/([^/]+)\/products$/);
+  if (method === 'GET' && collectionProductsMatch) {
+    return filterCatalog(staticProducts, {
+      collectionSlug: decodeURIComponent(collectionProductsMatch[1]),
+      search: url.searchParams.get('search') || url.searchParams.get('q') || '',
+      sort: url.searchParams.get('sort') || 'featured',
+      color: url.searchParams.get('color') || '',
+      minPriceCents: url.searchParams.has('minPrice') ? Number(url.searchParams.get('minPrice')) : undefined,
+      maxPriceCents: url.searchParams.has('maxPrice') ? Number(url.searchParams.get('maxPrice')) : undefined,
+      inStock: url.searchParams.get('inStock') === 'true',
+    });
+  }
+
+  if (method === 'GET' && url.pathname === '/collections') {
+    const collections = new Map();
+    for (const product of staticProducts) {
+      if (!collections.has(product.collection.slug)) {
+        collections.set(product.collection.slug, {
+          id: product.collection.slug,
+          ...product.collection,
+          _count: { products: 0 },
+        });
+      }
+      collections.get(product.collection.slug)._count.products += 1;
+    }
+    return [...collections.values()];
+  }
+
+  const productMatch = url.pathname.match(/^\/products\/([^/]+)$/);
+  if (method === 'GET' && productMatch) {
+    const slug = decodeURIComponent(productMatch[1]);
+    const product = staticProducts.find((entry) => entry.slug === slug);
+    if (!product) throw new Error('We couldn’t find that product.');
+    return product;
+  }
+
+  if (method === 'POST' && url.pathname === '/cart/validate') {
+    const body = JSON.parse(options.body || '{}');
+    return validateCatalogCart(body.items, staticProducts);
+  }
+
+  throw new Error('This read-only demo does not support accounts, administration, or checkout.');
 }
 
 function collectionOptions(collections, selectedId = '') {
@@ -350,6 +416,7 @@ async function renderProduct(slug) {
           <h1 class="page-title">${escapeHtml(name)}</h1>
           <p class="detail-price">${formatMoney(price, currency)}</p>
           <p class="detail-description">${escapeHtml(product.description || '')}</p>
+          ${STATIC_DEMO ? '<p class="notice">Static demo only. Prices and availability are placeholders; purchases are disabled.</p>' : ''}
           ${product.color ? `<p class="product-meta">Color: ${escapeHtml(product.color)}</p>` : ''}
           <p class="product-meta availability">${stock > 0 ? (variants.length ? `${initialStock} available in this option` : `${stock} available`) : 'Currently unavailable'}</p>
           <form class="detail-form" id="addToBagForm">
@@ -408,7 +475,12 @@ async function renderProduct(slug) {
         showToast(error.message);
       }
     });
-    if (product.collection?.slug) {
+    if (STATIC_DEMO && product.collection?.slug) {
+      const related = filterCatalog(staticProducts, { collectionSlug: product.collection.slug })
+        .filter((entry) => entry.id !== product.id)
+        .slice(0, 4);
+      $('#relatedProducts', routeView).innerHTML = related.length ? related.map(productCard).join('') : renderNotice('No related products right now.');
+    } else if (product.collection?.slug) {
       try {
         const relatedResult = await api(`/collections/${encodeURIComponent(product.collection.slug)}/products?limit=4`);
         const related = (Array.isArray(relatedResult) ? relatedResult : relatedResult.products || [])
@@ -447,7 +519,10 @@ async function renderCart() {
       return `<article class="cart-row" data-product-id="${escapeHtml(item.productId)}" data-variant-id="${escapeHtml(item.variantId || '')}"><div class="cart-image">${imageMarkup(image, name)}</div><div><h3>${escapeHtml(name)}</h3>${item.variantLabel ? `<p>${escapeHtml(item.variantLabel)}</p>` : ''}<p>${formatMoney(amount, currency)}</p><label class="visually-hidden" for="qty-${escapeHtml(item.productId)}-${escapeHtml(item.variantId || 'default')}">Quantity for ${escapeHtml(name)}</label><input id="qty-${escapeHtml(item.productId)}-${escapeHtml(item.variantId || 'default')}" data-quantity type="number" min="1" max="99" value="${Number(item.quantity)}" /><button type="button" data-remove>Remove</button></div><strong>${formatMoney(item.lineTotalCents, currency)}</strong></article>`;
     }).join('');
     const subtotal = cartResult.totalCents;
-    content.outerHTML = `<div id="cartContent">${lines}<div class="cart-summary"><div class="summary-line"><span>Subtotal</span><strong>${formatMoney(subtotal, cartResult.currency || 'usd')}</strong></div><div class="summary-line"><span>Shipping and tax</span><span>Calculated at checkout</span></div>${displayCurrency === 'PHP' ? `<p class="product-meta">Peso prices are estimates converted at ₱${phpPerUsd.toFixed(2)} per US$1. Checkout is charged in USD.</p>` : ''}<label for="checkoutEmail">Email for order updates</label><input id="checkoutEmail" type="email" autocomplete="email" required /><button class="solid-button" id="checkoutButton">Proceed to checkout</button><p class="product-meta" id="cartFeedback" role="status"></p></div></div>`;
+    const checkoutMarkup = STATIC_DEMO
+      ? '<p class="notice">Static demo only. Prices and stock are placeholders; this bag cannot be checked out.</p>'
+      : `<div class="summary-line"><span>Shipping and tax</span><span>Calculated at checkout</span></div>${displayCurrency === 'PHP' ? `<p class="product-meta">Peso prices are estimates converted at ₱${phpPerUsd.toFixed(2)} per US$1. Checkout is charged in USD.</p>` : ''}<label for="checkoutEmail">Email for order updates</label><input id="checkoutEmail" type="email" autocomplete="email" required /><button class="solid-button" id="checkoutButton">Proceed to checkout</button><p class="product-meta" id="cartFeedback" role="status"></p>`;
+    content.outerHTML = `<div id="cartContent">${lines}<div class="cart-summary"><div class="summary-line"><span>Subtotal</span><strong>${formatMoney(subtotal, cartResult.currency || 'usd')}</strong></div>${checkoutMarkup}</div></div>`;
     $('#cartContent', routeView).addEventListener('change', async (event) => {
       const row = event.target.closest('[data-product-id]');
       if (!row || !event.target.matches('[data-quantity]')) return;
@@ -469,7 +544,7 @@ async function renderCart() {
         await refreshBagCount();
       } catch (error) { showToast(error.message); }
     });
-    $('#checkoutButton', routeView).addEventListener('click', async () => {
+    if (!STATIC_DEMO) $('#checkoutButton', routeView).addEventListener('click', async () => {
       const button = $('#checkoutButton', routeView);
       button.disabled = true;
       try {
@@ -720,6 +795,18 @@ async function router() {
   if (path === '/collections' || path.startsWith('/collections/')) return renderCollection(path.split('/')[2] || '');
   if (path.startsWith('/products/')) return renderProduct(path.split('/').slice(2).join('/'));
   if (path === '/cart') return renderCart();
+  if (STATIC_DEMO && (path === '/login' || path === '/register' || path === '/account' || path.startsWith('/account/') || path === '/admin' || path.startsWith('/admin/'))) {
+    showRoutePage();
+    routeView.innerHTML = pageShell(`<p class="eyebrow">OG CAPS / STATIC DEMO</p><h1 class="page-title">FEATURE UNAVAILABLE</h1>${renderNotice('This read-only Vercel demo has no database. Accounts, order history, and administration are unavailable.', '<a href="/collections">Explore the sample catalog</a>')}`);
+    document.title = 'Feature unavailable — OG CAPS';
+    return;
+  }
+  if (STATIC_DEMO && path.startsWith('/checkout/')) {
+    showRoutePage();
+    routeView.innerHTML = pageShell(`<p class="eyebrow">OG CAPS / STATIC DEMO</p><h1 class="page-title">CHECKOUT UNAVAILABLE</h1>${renderNotice('This static demo does not accept orders or payments.', '<a href="/collections">Explore the sample catalog</a>')}`);
+    document.title = 'Checkout unavailable — OG CAPS';
+    return;
+  }
   if (path === '/login') return renderAuth(false);
   if (path === '/register') return renderAuth(true);
   if (path === '/account' || path.startsWith('/account/')) return renderAccount(path);
@@ -797,18 +884,36 @@ $('#currencyToggle').addEventListener('click', async () => {
 });
 
 async function initializeStorefront() {
-  try {
-    const storeConfig = await api('/store-config');
-    const rate = Number(storeConfig.PHP_PER_USD);
-    if (!Number.isFinite(rate) || rate <= 0) throw new Error('The configured PHP/USD exchange rate is invalid.');
-    phpPerUsd = rate;
-    $('#currencyToggle').disabled = false;
-  } catch (error) {
-    console.error('Could not load storefront currency settings', error);
-    displayCurrency = 'USD';
-    localStorage.setItem(CURRENCY_KEY, displayCurrency);
-    $('#currencyToggle').disabled = true;
-    showToast('Currency settings could not be loaded. Prices remain in USD.');
+  if (STATIC_DEMO) {
+    try {
+      const response = await fetch('/data/catalog.json');
+      if (!response.ok) throw new Error(`Could not load the static sample catalog (HTTP ${response.status}).`);
+      staticProducts = (await response.json()).map((product) => ({
+        ...product,
+        images: product.imageUrl ? [product.imageUrl] : [],
+      }));
+      if (!Array.isArray(staticProducts)) throw new Error('The static sample catalog has an invalid format.');
+      phpPerUsd = 57.5;
+      $('#currencyToggle').disabled = false;
+    } catch (error) {
+      staticCatalogError = error.message;
+      console.error('Could not load the static sample catalog', error);
+      showToast('The sample catalog could not be loaded.');
+    }
+  } else {
+    try {
+      const storeConfig = await api('/store-config');
+      const rate = Number(storeConfig.PHP_PER_USD);
+      if (!Number.isFinite(rate) || rate <= 0) throw new Error('The configured PHP/USD exchange rate is invalid.');
+      phpPerUsd = rate;
+      $('#currencyToggle').disabled = false;
+    } catch (error) {
+      console.error('Could not load storefront currency settings', error);
+      displayCurrency = 'USD';
+      localStorage.setItem(CURRENCY_KEY, displayCurrency);
+      $('#currencyToggle').disabled = true;
+      showToast('Currency settings could not be loaded. Prices remain in USD.');
+    }
   }
   updateCurrencyToggle();
   refreshBagCount();
